@@ -272,13 +272,10 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
 
             results.append((opt, result))
 
-        # 排序：纯收租按评分（IV Rank权重最高），愿意接股按年化收益率
-        if mode == "纯收租":
-            results.sort(key=lambda x: x[1]["total_score"], reverse=True)
-        else:
-            results.sort(key=lambda x: x[0].get("annual_return", 0), reverse=True)
+        # 排序：评分从高到低，评分相同时按年化收益率从高到低
+        results.sort(key=lambda x: (x[1]["total_score"], x[0].get("annual_return", 0)), reverse=True)
 
-        sort_label = "综合评分（IV Rank权重最高）" if mode == "纯收租" else "年化收益率"
+        sort_label = "综合评分优先，同分按年化收益率"
         st.markdown(f"**找到 {len(results)} 个结果** · 排序：{sort_label}")
         st.markdown("---")
 
