@@ -21,7 +21,6 @@ st.markdown("""<style>
 .intent-tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
 .tag-income { background: #059669; color: white; }
 .tag-willing { background: #2563eb; color: white; }
-.tag-active { background: #7c3aed; color: white; }
 </style>""", unsafe_allow_html=True)
 
 
@@ -84,7 +83,7 @@ st.subheader(f"📋 当前持仓 ({len(positions)}笔)")
 
 for i, p in enumerate(positions):
     intent = p.get("intent", "纯收租")
-    tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing", "主动接股": "tag-active"}.get(intent, "tag-income")
+    tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing"}.get(intent, "tag-income")
 
     with st.expander(
         f"{p.get('ticker', '')} | ${p.get('strike', 0)} | {p.get('expiry', '')} | {intent}",
@@ -128,7 +127,7 @@ for i, p in enumerate(positions):
             tp = p.get("take_profit_price")
             if tp:
                 st.info(f"💰 止盈触发价: ${float(tp):.2f}（当期权跌到此价格考虑平仓止盈）")
-        elif intent in ("愿意接股", "主动接股"):
+        elif intent == "愿意接股":
             tc = p.get("target_cost")
             if tc:
                 st.info(f"🎯 目标成本价: ${float(tc):.2f}（行权价 - 权利金）")
@@ -199,7 +198,9 @@ for i, p in enumerate(positions):
                 if st.button("确认赋权", key=f"confirm_assign_{i}"):
                     if assign_position(p["id"]):
                         st.success("✅ 已标记赋权")
-                        if intent in ("愿意接股", "主动接股"):
-                            st.info(f"🎯 恭喜以目标价接股！建议开始卖 Covered Call 继续收租。"
-                                    f"前往扫描页搜索 {p.get('ticker', '')} 的 Sell Call 机会。")
+                        if intent == "愿意接股":
+                            st.info(f"🎯 恭喜以目标价接股！建议开始卖 Covered Call 继续收租。\n\n"
+                                    f"👉 前往扫描页，选择 **Sell Call** 策略，搜索 **{p.get('ticker', '')}** "
+                                    f"的 Covered Call 机会。")
+                            st.page_link("pages/1_扫描.py", label=f"扫描 {p.get('ticker', '')} Covered Call", icon="🔍")
                         st.rerun()

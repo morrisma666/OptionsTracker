@@ -1,6 +1,6 @@
 """
 卖方期权分析软件 - 主入口
-支持三种交易意图：纯收租、愿意接股、主动接股
+支持两种交易意图：纯收租、愿意接股
 """
 
 import streamlit as st
@@ -57,7 +57,6 @@ st.markdown("""
 }
 .tag-income { background: #059669; color: white; }
 .tag-willing { background: #2563eb; color: white; }
-.tag-active { background: #7c3aed; color: white; }
 
 /* 手机底部导航栏 */
 @media (max-width: 768px) {
@@ -255,7 +254,7 @@ def main():
                 expiry = p.get("expiry", "")
                 ticker = p.get("ticker", "")
                 intent = p.get("intent", "")
-                tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing", "主动接股": "tag-active"}.get(intent, "tag-income")
+                tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing"}.get(intent, "tag-income")
                 st.markdown(f"""<div style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #334155">
                     <span style="width:90px;color:#94a3b8">{expiry}</span>
                     <strong style="width:60px">{ticker}</strong>
@@ -274,7 +273,7 @@ def main():
     if positions:
         for p in positions:
             intent = p.get("intent", "")
-            tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing", "主动接股": "tag-active"}.get(intent, "tag-income")
+            tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing"}.get(intent, "tag-income")
             pnl = float(p.get("pnl_pct", 0))
             pnl_color = "#10b981" if pnl >= 0 else "#ef4444"
             st.markdown(f"""<div class="option-card" style="display:flex;align-items:center;flex-wrap:wrap;gap:12px">
