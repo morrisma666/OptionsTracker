@@ -2,6 +2,7 @@
 yfinance 数据获取模块
 获取期权链、股票价格、IV Rank、财报日期等
 支持 Sell Put 和 Sell Call 两种策略
+Greeks 全部用 Black-Scholes 自行计算
 """
 
 import yfinance as yf
@@ -49,36 +50,52 @@ def _get_next_earnings(stock) -> str:
     return None
 
 
+@st.cache_data(ttl=600)
+def _get_hist_vol(ticker: str) -> float:
+    """获取30日历史波动率，作为IV的后备值"""
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="3mo")
+        if hist.empty or len(hist) < 20:
+            return 0.30
+        returns = hist["Close"].pct_change().dropna()
+        vol = returns.tail(30).std() * np.sqrt(252)
+        return max(float(vol), 0.05)
+    except Exception:
+        return 0.30
+
+
 @st.cache_data(ttl=300)
-def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None) -> tuple:
+def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None) -> pd.DataFrame:
     """
-    获取期权链数据，返回 (df, debug_info)
-    strategy: 'Sell Put' 获取认沽期权, 'Sell Call' 获取认购期权
-    debug_info: dict 记录每步过滤后的条数
+    获取期权链数据
+    过滤条件仅两条：权利金 >= $0.05，OI >= 50
+    Greeks 全部用 Black-Scholes 计算
     """
-    debug = {"raw": 0, "after_otm": 0, "after_oi": 0, "after_premium": 0, "after_greeks": 0, "after_annual": 0}
     try:
         stock = yf.Ticker(ticker)
         expirations = stock.options
         if not expirations:
-            return pd.DataFrame(), debug
+            return pd.DataFrame()
 
         if expiry and expiry in expirations:
             target_expiries = [expiry]
         else:
-            # 默认取未来60天内所有到期日
-            cutoff = (pd.Timestamp.now() + pd.Timedelta(days=60)).strftime("%Y-%m-%d")
-            target_expiries = [e for e in expirations if e <= cutoff]
+            # 默认取 DTE >= 21 天的所有到期日
+            cutoff_min = (pd.Timestamp.now() + pd.Timedelta(days=21)).strftime("%Y-%m-%d")
+            target_expiries = [e for e in expirations if e >= cutoff_min]
             if not target_expiries:
-                # 如果60天内没有，至少取前3个
                 target_expiries = list(expirations[:3])
 
-        all_options = []
         stock_price = get_stock_info(ticker)["price"]
         if stock_price <= 0:
-            return pd.DataFrame(), debug
+            return pd.DataFrame()
+
+        # 获取历史波动率作为IV后备
+        fallback_iv = _get_hist_vol(ticker)
 
         is_put = (strategy == "Sell Put")
+        all_options = []
 
         for exp in target_expiries:
             try:
@@ -86,14 +103,13 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
                 options = chain.puts.copy() if is_put else chain.calls.copy()
                 options["expiry"] = exp
                 options["stock_price"] = stock_price
-                dte = (pd.to_datetime(exp) - pd.Timestamp.now()).days
-                options["dte"] = dte
+                options["dte"] = (pd.to_datetime(exp) - pd.Timestamp.now()).days
                 all_options.append(options)
             except Exception:
                 continue
 
         if not all_options:
-            return pd.DataFrame(), debug
+            return pd.DataFrame()
 
         df = pd.concat(all_options, ignore_index=True)
 
@@ -105,8 +121,6 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
             "impliedVolatility": "iv",
         })
 
-        debug["raw"] = len(df)
-
         # OTM 过滤
         if is_put:
             df["otm_pct"] = ((stock_price - df["strike"]) / stock_price * 100).round(2)
@@ -114,30 +128,29 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
         else:
             df["otm_pct"] = ((df["strike"] - stock_price) / stock_price * 100).round(2)
             df = df[df["strike"] > stock_price]
-        debug["after_otm"] = len(df)
 
-        # OI >= 50
+        # === 仅两条过滤 ===
         df["oi"] = df["oi"].fillna(0)
         df = df[df["oi"] >= 50]
-        debug["after_oi"] = len(df)
-
-        # 权利金 >= $0.05
         df = df[df["last_price"] >= 0.05]
-        debug["after_premium"] = len(df)
 
-        # 用 Black-Scholes 计算 Greeks（保证一定有数值）
+        if df.empty:
+            return pd.DataFrame()
+
+        # IV：用 yfinance 的 impliedVolatility，缺失则用历史波动率
+        df["iv"] = df["iv"].apply(lambda x: x if (pd.notna(x) and x > 0) else fallback_iv)
+
+        # Black-Scholes 计算全部 Greeks
         option_type = "put" if is_put else "call"
         greeks_list = []
         for _, row in df.iterrows():
-            iv_val = row.get("iv", 0)
-            if pd.isna(iv_val) or iv_val <= 0:
-                iv_val = 0.30  # 默认30%
             g = calculate_greeks(
                 S=stock_price,
                 K=row["strike"],
                 T_days=max(row["dte"], 1),
-                iv=iv_val,
+                iv=row["iv"],
                 option_type=option_type,
+                r=0.05,
             )
             greeks_list.append(g)
 
@@ -147,23 +160,20 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
         df["theta"] = greeks_df["theta"]
         df["vega"] = greeks_df["vega"]
         df["gamma"] = greeks_df["gamma"]
-        debug["after_greeks"] = len(df)
 
-        # 计算年化收益率，过滤 >= 3%
+        # 计算年化收益率（仅用于显示和排序，不做过滤）
         df["annual_return"] = (df["last_price"] / df["strike"]) * (365 / df["dte"].clip(lower=1)) * 100
-        df = df[df["annual_return"] >= 3]
-        debug["after_annual"] = len(df)
 
-        return df, debug
+        return df
 
     except Exception as e:
         st.error(f"获取期权链失败: {e}")
-        return pd.DataFrame(), debug
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=600)
 def get_iv_rank(ticker: str) -> float:
-    """计算 IV Rank（基于过去一年 IV 的百分位）"""
+    """计算 IV Rank（基于过去一年历史波动率的百分位）"""
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="1y")
@@ -183,7 +193,7 @@ def get_iv_rank(ticker: str) -> float:
 
 @st.cache_data(ttl=3600)
 def get_moving_averages(ticker: str) -> dict:
-    """获取均线数据，用于技术支撑分析"""
+    """获取均线数据"""
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="1y")
@@ -202,20 +212,19 @@ def get_moving_averages(ticker: str) -> dict:
 
 @st.cache_data(ttl=300)
 def get_expiration_dates(ticker: str) -> list:
-    """获取可用到期日列表，默认返回未来60天内的"""
+    """获取可用到期日列表，只返回DTE>=21天的"""
     try:
         stock = yf.Ticker(ticker)
         all_dates = list(stock.options) if stock.options else []
-        cutoff = (pd.Timestamp.now() + pd.Timedelta(days=60)).strftime("%Y-%m-%d")
-        within_60d = [d for d in all_dates if d <= cutoff]
-        # 如果60天内没有，返回前5个
-        return within_60d if within_60d else all_dates[:5]
+        cutoff = (pd.Timestamp.now() + pd.Timedelta(days=21)).strftime("%Y-%m-%d")
+        filtered = [d for d in all_dates if d >= cutoff]
+        return filtered if filtered else all_dates[:5]
     except Exception:
         return []
 
 
 def get_current_option_price(contract_symbol: str) -> float:
-    """获取期权合约当前价格（用于持仓实时更新）"""
+    """获取期权合约当前价格"""
     try:
         ticker = yf.Ticker(contract_symbol)
         info = ticker.info

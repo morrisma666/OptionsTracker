@@ -1,5 +1,6 @@
 """
 期权扫描页 - 支持 Sell Put / Sell Call，两种交易意图
+Greeks 全部用 Black-Scholes 计算，不依赖 yfinance
 """
 
 import streamlit as st
@@ -56,7 +57,6 @@ def render_option_card(opt, result, stock_info, iv_rank, mode, strategy, idx):
             st.markdown('<div class="danger-card">🚨 财报前禁入警告：到期日跨越财报日！</div>',
                         unsafe_allow_html=True)
 
-        # 预警提示（纯收租模式的安全边际/DTE预警）
         for w in result.get("warnings", []):
             st.markdown(f'<div class="danger-card">{w}</div>', unsafe_allow_html=True)
 
@@ -76,17 +76,16 @@ def render_option_card(opt, result, stock_info, iv_rank, mode, strategy, idx):
         c3.metric("Delta", f"{opt.get('delta', 0):.4f}")
         c4.metric("权利金", f"${opt.get('last_price', 0):.2f}")
         c5.metric("IV", f"{opt.get('iv', 0)*100:.1f}%")
-        c6.metric("OI", f"{opt.get('oi', 0):,}")
+        c6.metric("OI", f"{opt.get('oi', 0):,.0f}")
 
-        # Greeks 行（全部用 Black-Scholes 计算，不会N/A）
+        # Greeks 行
         c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Theta", f"{opt.get('theta', 0):.4f}")
         c2.metric("Vega", f"{opt.get('vega', 0):.4f}")
-        c3.metric("Gamma", f"{opt.get('gamma', 0):.4f}")
+        c3.metric("Gamma", f"{opt.get('gamma', 0):.6f}")
         c4.metric("IV Rank", f"{iv_rank:.0f}%")
         c5.metric("年化收益", f"{result.get('annual_return', 0):.1f}%")
 
-        # 模式特有字段
         if mode == "纯收租":
             c6.metric("止盈触发价", f"${result.get('take_profit_price', 0):.2f}")
         elif mode == "愿意接股":
@@ -168,7 +167,7 @@ with col_intent:
         "🎯 交易意图",
         ["纯收租", "愿意接股"],
         horizontal=True,
-        help="纯收租：Delta 0.05-0.20 | 愿意接股：Delta 0.20-0.40",
+        help="纯收租：低Delta安全收租 | 愿意接股：较高Delta换取更高权利金",
     )
 
 # Delta范围说明
@@ -179,14 +178,26 @@ delta_info = {
 strategy_label = "认沽期权(Put)" if strategy == "Sell Put" else "认购期权(Call)"
 st.caption(f"📋 {strategy_label} · {delta_info[mode]}")
 
-# 到期日筛选
+# 到期日筛选（只显示DTE>=21天）
 expiry_filter = None
 if ticker_input:
     expirations = get_expiration_dates(ticker_input)
     if expirations:
-        expiry_options = ["全部（60天内所有到期日）"] + expirations
-        selected_expiry = st.selectbox("到期日", expiry_options)
-        if selected_expiry != "全部（60天内所有到期日）":
+        # 找出默认选项：DTE在21-45天的第一个
+        default_idx = 0
+        for i, exp in enumerate(expirations):
+            dte = (pd.to_datetime(exp) - pd.Timestamp.now()).days
+            if 21 <= dte <= 45:
+                default_idx = i + 1  # +1 因为有"全部"选项
+                break
+
+        expiry_options = ["全部（DTE≥21天）"] + expirations
+        selected_expiry = st.selectbox(
+            "到期日 ⏱️ 建议选21-45天（卖方甜蜜区间）",
+            expiry_options,
+            index=default_idx,
+        )
+        if selected_expiry != "全部（DTE≥21天）":
             expiry_filter = selected_expiry
 
 # ========== 扫描执行 ==========
@@ -201,50 +212,18 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
 
         iv_rank = get_iv_rank(ticker_input)
         ma_data = get_moving_averages(ticker_input)
-        chain, debug_info = get_option_chain(ticker_input, strategy, expiry_filter)
+        chain = get_option_chain(ticker_input, strategy, expiry_filter)
 
         if chain.empty:
-            st.warning("未找到符合条件的期权（权利金≥$0.05, OI≥50, 年化≥3%）")
-            # 仍然显示调试信息
-            with st.expander("🔧 调试信息", expanded=True):
-                for k, v in debug_info.items():
-                    st.text(f"{k}: {v} 条")
+            st.warning("未找到符合条件的期权（权利金≥$0.05, OI≥50）。请尝试换一个到期日或股票代码。")
             st.stop()
 
         # 添加ticker列
         chain["ticker"] = ticker_input
 
-        # Delta 已由 Black-Scholes 计算，取绝对值过滤
-        chain["abs_delta"] = chain["delta"].abs()
-        debug_info["before_delta_filter"] = len(chain)
-
-        if mode == "纯收租":
-            filtered = chain[(chain["abs_delta"] >= 0.05) & (chain["abs_delta"] <= 0.20)]
-        else:  # 愿意接股
-            filtered = chain[(chain["abs_delta"] >= 0.20) & (chain["abs_delta"] <= 0.40)]
-
-        debug_info["after_delta_strict"] = len(filtered)
-
-        # 如果过滤后太少，放宽条件
-        if len(filtered) < 3:
-            st.info(f"严格Delta范围内仅{len(filtered)}个结果，已适当放宽范围")
-            if mode == "纯收租":
-                filtered = chain[(chain["abs_delta"] >= 0.02) & (chain["abs_delta"] <= 0.35)]
-            else:
-                filtered = chain[(chain["abs_delta"] >= 0.10) & (chain["abs_delta"] <= 0.50)]
-
-        debug_info["after_delta_final"] = len(filtered)
-
-        if filtered.empty:
-            st.warning("没有找到符合Delta范围的期权")
-            with st.expander("🔧 调试信息", expanded=True):
-                for k, v in debug_info.items():
-                    st.text(f"{k}: {v} 条")
-            st.stop()
-
         # 计算评分
         results = []
-        for _, row in filtered.iterrows():
+        for _, row in chain.iterrows():
             opt = row.to_dict()
             opt["ma_support_score"] = calculate_ma_support_score(opt["strike"], ma_data)
 
@@ -255,24 +234,14 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
 
             results.append((opt, result))
 
-        # 按分数排序
-        results.sort(key=lambda x: x[1]["total_score"], reverse=True)
+        # 排序：纯收租按IV Rank（评分已含IV权重），愿意接股按年化收益率
+        if mode == "纯收租":
+            results.sort(key=lambda x: iv_rank * 100 + x[1]["total_score"], reverse=True)
+        else:
+            results.sort(key=lambda x: x[0].get("annual_return", 0), reverse=True)
 
-        st.markdown(f"**找到 {len(results)} 个结果，按评分排序：**")
+        st.markdown(f"**找到 {len(results)} 个结果** · 排序方式：{'IV Rank优先' if mode == '纯收租' else '年化收益率优先'}")
         st.markdown("---")
 
         for idx, (opt, result) in enumerate(results[:20]):
             render_option_card(opt, result, stock_info, iv_rank, mode, strategy, idx)
-
-        # 调试信息
-        with st.expander("🔧 调试信息（数据过滤流程）"):
-            st.text(f"原始数据条数: {debug_info.get('raw', 0)}")
-            st.text(f"OTM过滤后: {debug_info.get('after_otm', 0)}")
-            st.text(f"OI≥50过滤后: {debug_info.get('after_oi', 0)}")
-            st.text(f"权利金≥$0.05过滤后: {debug_info.get('after_premium', 0)}")
-            st.text(f"Greeks计算后: {debug_info.get('after_greeks', 0)}")
-            st.text(f"年化≥3%过滤后: {debug_info.get('after_annual', 0)}")
-            st.text(f"Delta过滤前: {debug_info.get('before_delta_filter', 0)}")
-            st.text(f"Delta严格范围后: {debug_info.get('after_delta_strict', 0)}")
-            st.text(f"Delta最终: {debug_info.get('after_delta_final', 0)}")
-            st.text(f"最终显示: {len(results)} 条")
