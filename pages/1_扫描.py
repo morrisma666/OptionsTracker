@@ -17,7 +17,7 @@ from utils.scoring import (
     score_pure_income, score_willing_assign,
     calculate_ma_support_score, cross_mode_hint,
 )
-from utils.db import add_position
+from utils.db import add_position, check_db_connection
 
 # ========== 样式 ==========
 st.markdown("""<style>
@@ -147,23 +147,31 @@ def render_option_card(opt, result, stock_info, iv_rank, mode, strategy, idx):
                         "current_price": opt.get("last_price", 0),
                         "pnl_pct": 0,
                         "status": "持仓中",
-                        "target_cost": result.get("target_cost", None),
-                        "take_profit_price": result.get("take_profit_price", None),
+                        "target_cost": result.get("target_cost"),
+                        "take_profit_price": result.get("take_profit_price"),
                         "score": result["total_score"],
                         "contract_symbol": opt.get("contract", ""),
                         "notes": notes_input,
                     }
-                    if add_position(position):
-                        st.success(f"✅ 已保存: {opt.get('ticker', '')} ${opt.get('strike', 0)} {opt.get('expiry', '')}")
+                    success, msg = add_position(position)
+                    if success:
+                        st.success(f"✅ {msg}")
                         st.session_state[f"show_form_{contract_key}"] = False
                     else:
-                        st.warning("保存失败。请检查数据库配置。")
+                        st.error(f"❌ 保存失败：{msg}")
 
         st.markdown("---")
 
 
 # ========== 主界面 ==========
 st.title("🔍 期权扫描")
+
+# 数据库连接状态
+db_ok, db_msg = check_db_connection()
+if db_ok:
+    st.caption(f"🟢 数据库：{db_msg}")
+else:
+    st.caption(f"🔴 数据库：{db_msg}")
 
 # 侧边栏 - 快捷标签
 with st.sidebar:
