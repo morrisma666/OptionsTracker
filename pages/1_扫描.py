@@ -184,9 +184,9 @@ expiry_filter = None
 if ticker_input:
     expirations = get_expiration_dates(ticker_input)
     if expirations:
-        expiry_options = ["全部（前4个到期日）"] + expirations[:8]
+        expiry_options = ["全部（60天内所有到期日）"] + expirations
         selected_expiry = st.selectbox("到期日", expiry_options)
-        if selected_expiry != "全部（前4个到期日）":
+        if selected_expiry != "全部（60天内所有到期日）":
             expiry_filter = selected_expiry
 
 # ========== 扫描执行 ==========
@@ -201,10 +201,14 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
 
         iv_rank = get_iv_rank(ticker_input)
         ma_data = get_moving_averages(ticker_input)
-        chain = get_option_chain(ticker_input, strategy, expiry_filter)
+        chain, debug_info = get_option_chain(ticker_input, strategy, expiry_filter)
 
         if chain.empty:
-            st.warning("未找到符合条件的期权（权利金≥$0.10, OI≥100, 年化≥8%, Theta有效）")
+            st.warning("未找到符合条件的期权（权利金≥$0.05, OI≥50, 年化≥3%）")
+            # 仍然显示调试信息
+            with st.expander("🔧 调试信息", expanded=True):
+                for k, v in debug_info.items():
+                    st.text(f"{k}: {v} 条")
             st.stop()
 
         # 添加ticker列
@@ -212,22 +216,30 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
 
         # Delta 已由 Black-Scholes 计算，取绝对值过滤
         chain["abs_delta"] = chain["delta"].abs()
+        debug_info["before_delta_filter"] = len(chain)
 
         if mode == "纯收租":
             filtered = chain[(chain["abs_delta"] >= 0.05) & (chain["abs_delta"] <= 0.20)]
         else:  # 愿意接股
             filtered = chain[(chain["abs_delta"] >= 0.20) & (chain["abs_delta"] <= 0.40)]
 
+        debug_info["after_delta_strict"] = len(filtered)
+
         # 如果过滤后太少，放宽条件
         if len(filtered) < 3:
             st.info(f"严格Delta范围内仅{len(filtered)}个结果，已适当放宽范围")
             if mode == "纯收租":
-                filtered = chain[(chain["abs_delta"] >= 0.03) & (chain["abs_delta"] <= 0.30)]
+                filtered = chain[(chain["abs_delta"] >= 0.02) & (chain["abs_delta"] <= 0.35)]
             else:
-                filtered = chain[(chain["abs_delta"] >= 0.15) & (chain["abs_delta"] <= 0.45)]
+                filtered = chain[(chain["abs_delta"] >= 0.10) & (chain["abs_delta"] <= 0.50)]
+
+        debug_info["after_delta_final"] = len(filtered)
 
         if filtered.empty:
             st.warning("没有找到符合Delta范围的期权")
+            with st.expander("🔧 调试信息", expanded=True):
+                for k, v in debug_info.items():
+                    st.text(f"{k}: {v} 条")
             st.stop()
 
         # 计算评分
@@ -249,5 +261,18 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
         st.markdown(f"**找到 {len(results)} 个结果，按评分排序：**")
         st.markdown("---")
 
-        for idx, (opt, result) in enumerate(results[:15]):
+        for idx, (opt, result) in enumerate(results[:20]):
             render_option_card(opt, result, stock_info, iv_rank, mode, strategy, idx)
+
+        # 调试信息
+        with st.expander("🔧 调试信息（数据过滤流程）"):
+            st.text(f"原始数据条数: {debug_info.get('raw', 0)}")
+            st.text(f"OTM过滤后: {debug_info.get('after_otm', 0)}")
+            st.text(f"OI≥50过滤后: {debug_info.get('after_oi', 0)}")
+            st.text(f"权利金≥$0.05过滤后: {debug_info.get('after_premium', 0)}")
+            st.text(f"Greeks计算后: {debug_info.get('after_greeks', 0)}")
+            st.text(f"年化≥3%过滤后: {debug_info.get('after_annual', 0)}")
+            st.text(f"Delta过滤前: {debug_info.get('before_delta_filter', 0)}")
+            st.text(f"Delta严格范围后: {debug_info.get('after_delta_strict', 0)}")
+            st.text(f"Delta最终: {debug_info.get('after_delta_final', 0)}")
+            st.text(f"最终显示: {len(results)} 条")
