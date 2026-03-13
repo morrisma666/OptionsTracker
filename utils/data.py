@@ -1,8 +1,9 @@
 """
 yfinance 数据获取模块
-获取期权链、股票价格、IV Rank、财报日期等
-支持 Sell Put 和 Sell Call 两种策略
-Greeks 全部用 Black-Scholes 自行计算
+- Greeks 全部用 Black-Scholes 自行计算（r=5%, q=0%）
+- IV 用 yfinance 的 impliedVolatility，为空则用30日历史波动率
+- IV Rank 用252个交易日历史IV百分位
+- 过滤条件仅：权利金 >= $0.05, OI >= 50
 """
 
 import yfinance as yf
@@ -69,8 +70,8 @@ def _get_hist_vol(ticker: str) -> float:
 def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None) -> pd.DataFrame:
     """
     获取期权链数据
-    过滤条件仅两条：权利金 >= $0.05，OI >= 50
-    Greeks 全部用 Black-Scholes 计算
+    过滤条件仅两条：权利金 >= $0.05, OI >= 50
+    Greeks 全部用 Black-Scholes 计算（r=5%, q=0%）
     """
     try:
         stock = yf.Ticker(ticker)
@@ -81,7 +82,7 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
         if expiry and expiry in expirations:
             target_expiries = [expiry]
         else:
-            # 默认取 DTE >= 21 天的所有到期日
+            # 默认取 DTE >= 21 天的到期日
             cutoff_min = (pd.Timestamp.now() + pd.Timedelta(days=21)).strftime("%Y-%m-%d")
             target_expiries = [e for e in expirations if e >= cutoff_min]
             if not target_expiries:
@@ -91,9 +92,7 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
         if stock_price <= 0:
             return pd.DataFrame()
 
-        # 获取历史波动率作为IV后备
         fallback_iv = _get_hist_vol(ticker)
-
         is_put = (strategy == "Sell Put")
         all_options = []
 
@@ -137,10 +136,10 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
         if df.empty:
             return pd.DataFrame()
 
-        # IV：用 yfinance 的 impliedVolatility，缺失则用历史波动率
+        # IV：用 yfinance 的 impliedVolatility，缺失则用30日历史波动率
         df["iv"] = df["iv"].apply(lambda x: x if (pd.notna(x) and x > 0) else fallback_iv)
 
-        # Black-Scholes 计算全部 Greeks
+        # Black-Scholes 计算全部 Greeks（r=5%, q=0%）
         option_type = "put" if is_put else "call"
         greeks_list = []
         for _, row in df.iterrows():
@@ -161,7 +160,7 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
         df["vega"] = greeks_df["vega"]
         df["gamma"] = greeks_df["gamma"]
 
-        # 计算年化收益率（仅用于显示和排序，不做过滤）
+        # 计算年化收益率（仅显示/排序用，不过滤）
         df["annual_return"] = (df["last_price"] / df["strike"]) * (365 / df["dte"].clip(lower=1)) * 100
 
         return df
@@ -173,20 +172,32 @@ def get_option_chain(ticker: str, strategy: str = "Sell Put", expiry: str = None
 
 @st.cache_data(ttl=600)
 def get_iv_rank(ticker: str) -> float:
-    """计算 IV Rank（基于过去一年历史波动率的百分位）"""
+    """
+    IV Rank：过去252个交易日的历史IV百分位
+    用每个交易日的20日滚动波动率作为该日的IV代理值，
+    然后计算当前IV在过去252天中的百分位排名
+    """
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
-        if hist.empty or len(hist) < 20:
+        hist = stock.history(period="2y")
+        if hist.empty or len(hist) < 60:
             return 50.0
         returns = hist["Close"].pct_change().dropna()
-        rolling_vol = returns.rolling(window=20).std() * np.sqrt(252) * 100
-        rolling_vol = rolling_vol.dropna()
-        if len(rolling_vol) < 10:
+        # 20日滚动波动率年化 = 每日的"IV代理值"
+        rolling_iv = returns.rolling(window=20).std() * np.sqrt(252)
+        rolling_iv = rolling_iv.dropna()
+        if len(rolling_iv) < 60:
             return 50.0
-        current_vol = rolling_vol.iloc[-1]
-        rank = (rolling_vol < current_vol).sum() / len(rolling_vol) * 100
-        return round(rank, 1)
+        # 取最近252个交易日
+        iv_window = rolling_iv.tail(252)
+        current_iv = iv_window.iloc[-1]
+        iv_min = iv_window.min()
+        iv_max = iv_window.max()
+        # IV Rank = (当前IV - 252日最低IV) / (252日最高IV - 252日最低IV)
+        if iv_max == iv_min:
+            return 50.0
+        rank = (current_iv - iv_min) / (iv_max - iv_min) * 100
+        return round(float(rank), 1)
     except Exception:
         return 50.0
 

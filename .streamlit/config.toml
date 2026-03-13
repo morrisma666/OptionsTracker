@@ -3,8 +3,7 @@ base = "dark"
 
 [server]
 headless = true
-enableCORS = false
-enableXsrfProtection = true
+enableXsrfProtection = false
 
 [browser]
 gatherUsageStats = false

@@ -8,20 +8,40 @@ from datetime import datetime, date
 
 st.set_page_config(page_title="持仓管理", page_icon="💼", layout="wide")
 
-from utils.db import get_positions, update_position, close_position, assign_position
+from utils.db import get_positions, update_position, close_position, assign_position, add_position
 
 
 # ========== 样式 ==========
 st.markdown("""<style>
-.metric-card { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px; padding: 1rem 1.2rem; border-left: 4px solid #0f3460; margin-bottom: 0.5rem; }
-.metric-card h3 { font-size: 0.85rem; color: #8892b0; margin: 0; }
-.metric-card .value { font-size: 1.6rem; font-weight: 700; color: #e6f1ff; }
 .warning-card { background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 8px; padding: 0.8rem; margin: 0.3rem 0; color: #92400e; }
 .danger-card { background: #fee2e2; border-left: 4px solid #ef4444; border-radius: 8px; padding: 0.8rem; margin: 0.3rem 0; color: #991b1b; }
 .intent-tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
 .tag-income { background: #059669; color: white; }
 .tag-willing { background: #2563eb; color: white; }
+.strategy-tag { display:inline-block; padding:2px 8px; border-radius:6px; font-weight:600; font-size:0.75rem; }
+.tag-put { background:#7c3aed; color:white; }
+.tag-call { background:#0891b2; color:white; }
 </style>""", unsafe_allow_html=True)
+
+
+def safe_float(val, default=0.0):
+    """安全转换为float"""
+    try:
+        if val is None:
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def parse_expiry(expiry_str):
+    """安全解析到期日"""
+    if not expiry_str:
+        return None
+    try:
+        return datetime.strptime(str(expiry_str)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
 
 
 st.title("💼 持仓管理")
@@ -44,24 +64,15 @@ week_expiry = 0
 for p in positions:
     ticker = p.get("ticker", "")
     ticker_counts[ticker] = ticker_counts.get(ticker, 0) + 1
-    expiry = p.get("expiry", "")
-    if expiry:
-        try:
-            exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
-            dte = (exp_date - today).days
-            if dte <= 3:
-                warnings.append(("danger", f"🔴 {ticker} ${p.get('strike')} {expiry} — 仅剩{dte}天！需立即处理"))
-            elif dte <= 7:
-                warnings.append(("warning", f"🟠 {ticker} ${p.get('strike')} {expiry} — 还剩{dte}天到期"))
-                week_expiry += 1
-        except ValueError:
-            pass
-    # 安全边际检查
-    otm_pct = float(p.get("otm_pct", 10))
-    if otm_pct < 5:
-        warnings.append(("warning", f"⚠️ {ticker} ${p.get('strike')} 安全边际仅{otm_pct:.1f}%"))
+    exp_date = parse_expiry(p.get("expiry", ""))
+    if exp_date:
+        dte = (exp_date - today).days
+        if dte <= 3:
+            warnings.append(("danger", f"🔴 {ticker} ${p.get('strike')} {str(p.get('expiry',''))[:10]} — 仅剩{dte}天！需立即处理"))
+        elif dte <= 7:
+            warnings.append(("warning", f"🟠 {ticker} ${p.get('strike')} {str(p.get('expiry',''))[:10]} — 还剩{dte}天到期"))
+            week_expiry += 1
 
-# 同标的超配
 for ticker, count in ticker_counts.items():
     if count >= 3:
         warnings.append(("warning", f"⚠️ {ticker} 持仓{count}笔，注意超配风险"))
@@ -83,58 +94,57 @@ st.subheader(f"📋 当前持仓 ({len(positions)}笔)")
 
 for i, p in enumerate(positions):
     intent = p.get("intent", "纯收租")
+    strat = p.get("strategy", "Sell Put")
     tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing"}.get(intent, "tag-income")
+    strat_cls = "tag-put" if "Put" in strat else "tag-call"
+    expiry_str = str(p.get("expiry", ""))[:10]
 
     with st.expander(
-        f"{p.get('ticker', '')} | ${p.get('strike', 0)} | {p.get('expiry', '')} | {intent}",
+        f"{p.get('ticker', '')} | {strat} | ${p.get('strike', 0)} | {expiry_str} | {intent}",
         expanded=False,
     ):
         # 基本信息
         col1, col2, col3, col4 = st.columns(4)
         col1.markdown(f"**股票代码**: {p.get('ticker', '')}")
-        col2.markdown(f"**策略**: {p.get('strategy', 'Sell Put')}")
+        col2.markdown(f'<span class="strategy-tag {strat_cls}">{strat}</span>', unsafe_allow_html=True)
         col3.markdown(f'<span class="intent-tag {tag_class}">{intent}</span>', unsafe_allow_html=True)
         col4.markdown(f"**状态**: {p.get('status', '持仓中')}")
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("行权价", f"${p.get('strike', 0)}")
-        col2.metric("到期日", p.get("expiry", ""))
+        col1.metric("行权价", f"${safe_float(p.get('strike')):.2f}")
+        col2.metric("到期日", expiry_str)
 
         # 计算DTE
-        expiry = p.get("expiry", "")
-        dte = "N/A"
-        if expiry:
-            try:
-                exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
-                dte = (exp_date - today).days
-            except ValueError:
-                pass
+        exp_date = parse_expiry(p.get("expiry", ""))
+        dte = (exp_date - today).days if exp_date else "N/A"
         col3.metric("DTE", f"{dte}天" if isinstance(dte, int) else dte)
-        col4.metric("开仓日期", p.get("open_date", ""))
+        col4.metric("开仓日期", str(p.get("open_date", ""))[:10])
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("收取权利金", f"${p.get('premium', 0):.2f}")
-        col2.metric("保证金占用", f"${p.get('margin', 0):,.0f}")
-        current = float(p.get("current_price", 0))
-        premium = float(p.get("premium", 0))
+        premium = safe_float(p.get("premium"))
+        margin = safe_float(p.get("margin"))
+        current = safe_float(p.get("current_price"))
         pnl = premium - current
         pnl_pct = (pnl / premium * 100) if premium > 0 else 0
+
+        col1.metric("收取权利金", f"${premium:.2f}")
+        col2.metric("保证金占用", f"${margin:,.0f}")
         col3.metric("当前价格", f"${current:.2f}")
         col4.metric("盈亏", f"${pnl:.2f} ({pnl_pct:+.1f}%)")
 
         # 模式特有字段
         if intent == "纯收租":
             tp = p.get("take_profit_price")
-            if tp:
-                st.info(f"💰 止盈触发价: ${float(tp):.2f}（当期权跌到此价格考虑平仓止盈）")
+            if tp is not None:
+                st.info(f"💰 止盈触发价: ${safe_float(tp):.2f}（当期权跌到此价格考虑平仓止盈）")
         elif intent == "愿意接股":
             tc = p.get("target_cost")
-            if tc:
-                st.info(f"🎯 目标成本价: ${float(tc):.2f}（行权价 - 权利金）")
+            if tc is not None:
+                st.info(f"🎯 目标成本价: ${safe_float(tc):.2f}（行权价 - 权利金）")
 
         # 备注
-        notes = st.text_input("备注", value=p.get("notes", ""), key=f"notes_{i}")
-        if notes != p.get("notes", ""):
+        notes = st.text_input("备注", value=p.get("notes", "") or "", key=f"notes_{i}")
+        if notes != (p.get("notes", "") or ""):
             update_position(p["id"], {"notes": notes})
 
         st.markdown("---")
@@ -154,6 +164,7 @@ for i, p in enumerate(positions):
                 if st.button("确认平仓", key=f"confirm_close_{i}"):
                     if close_position(p["id"], close_price):
                         st.success("✅ 已平仓")
+                        st.session_state[f"closing_{i}"] = False
                         st.rerun()
 
         with btn_col2:
@@ -165,13 +176,10 @@ for i, p in enumerate(positions):
                 new_premium = st.number_input("新权利金 ($)", value=0.0, step=0.01, key=f"new_prem_{i}")
                 if st.button("确认展期", key=f"confirm_roll_{i}"):
                     if new_expiry and new_premium > 0:
-                        # 先平仓旧的
                         close_position(p["id"], current)
-                        # 创建新持仓
-                        from utils.db import add_position
                         new_pos = {
                             "ticker": p["ticker"],
-                            "strategy": p["strategy"],
+                            "strategy": p.get("strategy", "Sell Put"),
                             "intent": p["intent"],
                             "strike": p["strike"],
                             "expiry": new_expiry,
@@ -183,10 +191,11 @@ for i, p in enumerate(positions):
                             "status": "持仓中",
                             "target_cost": p.get("target_cost"),
                             "take_profit_price": new_premium * 0.5 if intent == "纯收租" else None,
-                            "notes": f"展期自 {p.get('expiry', '')}",
+                            "notes": f"展期自 {expiry_str}",
                         }
                         add_position(new_pos)
                         st.success("✅ 展期成功")
+                        st.session_state[f"rolling_{i}"] = False
                         st.rerun()
 
         with btn_col3:
@@ -203,4 +212,5 @@ for i, p in enumerate(positions):
                                     f"👉 前往扫描页，选择 **Sell Call** 策略，搜索 **{p.get('ticker', '')}** "
                                     f"的 Covered Call 机会。")
                             st.page_link("pages/1_扫描.py", label=f"扫描 {p.get('ticker', '')} Covered Call", icon="🔍")
+                        st.session_state[f"assigning_{i}"] = False
                         st.rerun()

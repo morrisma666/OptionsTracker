@@ -1,5 +1,5 @@
 """
-卖方期权分析软件 - 主入口
+卖方期权分析软件 - 仪表盘主页
 支持两种交易意图：纯收租、愿意接股
 """
 
@@ -7,7 +7,7 @@ import streamlit as st
 
 # ========== 页面配置 ==========
 st.set_page_config(
-    page_title="期权卖方助手",
+    page_title="仪表盘 - 期权卖方助手",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="auto",
@@ -32,13 +32,6 @@ st.markdown("""
 }
 .metric-card h3 { font-size: 0.85rem; color: #8892b0; margin: 0; }
 .metric-card .value { font-size: 1.6rem; font-weight: 700; color: #e6f1ff; }
-.score-badge {
-    display: inline-block; padding: 4px 12px; border-radius: 20px;
-    font-weight: 600; font-size: 0.9rem;
-}
-.score-high { background: #10b981; color: white; }
-.score-mid { background: #f59e0b; color: white; }
-.score-low { background: #ef4444; color: white; }
 .warning-card {
     background: #fef3c7; border-left: 4px solid #f59e0b;
     border-radius: 8px; padding: 0.8rem; margin: 0.3rem 0; color: #92400e;
@@ -57,6 +50,12 @@ st.markdown("""
 }
 .tag-income { background: #059669; color: white; }
 .tag-willing { background: #2563eb; color: white; }
+.strategy-tag-sm {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 0.65rem; font-weight: 600;
+}
+.tag-put-sm { background: #7c3aed; color: white; }
+.tag-call-sm { background: #0891b2; color: white; }
 
 /* 手机底部导航栏 */
 @media (max-width: 768px) {
@@ -91,7 +90,7 @@ st.markdown("""
 
 # ========== 仪表盘主页 ==========
 def main():
-    st.title("📊 期权卖方助手")
+    st.title("📊 仪表盘")
     st.caption("卖方期权策略分析 · 持仓管理 · 风险监控")
 
     from utils.db import get_dashboard_stats, get_positions
@@ -126,7 +125,6 @@ def main():
             <div class="value">${stats.get('month_premium', 0):,.0f}</div>
         </div>""", unsafe_allow_html=True)
     with col2:
-        # 浮动盈亏
         positions = stats.get("positions", [])
         floating_pnl = 0
         for p in positions:
@@ -153,7 +151,6 @@ def main():
     col1, col2, col3, col4 = st.columns(4)
     today = date.today()
 
-    # 计算风险数据
     positions = stats.get("positions", [])
     expiring_7d = 0
     risk_count = 0
@@ -162,15 +159,15 @@ def main():
         expiry = p.get("expiry", "")
         if expiry:
             try:
-                exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+                exp_date = datetime.strptime(str(expiry)[:10], "%Y-%m-%d").date()
                 dte = (exp_date - today).days
                 if dte <= 7:
                     expiring_7d += 1
                 if dte <= 3:
                     risk_count += 1
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
-        total_margin += float(p.get("margin", 0))
+        total_margin += float(p.get("margin", 0) or 0)
 
     with col1:
         st.metric("当前持仓数", f"{len(positions)} 笔")
@@ -192,7 +189,6 @@ def main():
             st.info("暂无持仓")
         else:
             has_warning = False
-            # 按标的分组检查超配
             ticker_counts = {}
             week_expiry_count = 0
             for p in positions:
@@ -201,7 +197,7 @@ def main():
                 expiry = p.get("expiry", "")
                 if expiry:
                     try:
-                        exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+                        exp_date = datetime.strptime(str(expiry)[:10], "%Y-%m-%d").date()
                         dte = (exp_date - today).days
                         if dte <= 7:
                             week_expiry_count += 1
@@ -213,7 +209,7 @@ def main():
                             has_warning = True
                             st.markdown(f'<div class="warning-card">🟠 {ticker} ${p.get("strike")} '
                                         f'{expiry} 还剩{dte}天到期</div>', unsafe_allow_html=True)
-                    except ValueError:
+                    except (ValueError, TypeError):
                         pass
 
             for ticker, count in ticker_counts.items():
@@ -249,16 +245,19 @@ def main():
     with right:
         st.subheader("📅 近期到期日历")
         if positions:
-            sorted_pos = sorted(positions, key=lambda x: x.get("expiry", ""))
+            sorted_pos = sorted(positions, key=lambda x: str(x.get("expiry", "")))
             for p in sorted_pos[:8]:
-                expiry = p.get("expiry", "")
+                expiry = str(p.get("expiry", ""))[:10]
                 ticker = p.get("ticker", "")
                 intent = p.get("intent", "")
+                strat = p.get("strategy", "Sell Put")
                 tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing"}.get(intent, "tag-income")
+                strat_cls = "tag-put-sm" if "Put" in strat else "tag-call-sm"
                 st.markdown(f"""<div style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #334155">
                     <span style="width:90px;color:#94a3b8">{expiry}</span>
                     <strong style="width:60px">{ticker}</strong>
                     <span>${p.get('strike', 0)}</span>
+                    <span class="strategy-tag-sm {strat_cls}" style="margin-left:8px">{strat}</span>
                     <span class="intent-tag {tag_class}" style="margin-left:auto">{intent}</span>
                 </div>""", unsafe_allow_html=True)
         else:
@@ -273,14 +272,19 @@ def main():
     if positions:
         for p in positions:
             intent = p.get("intent", "")
+            strat = p.get("strategy", "Sell Put")
             tag_class = {"纯收租": "tag-income", "愿意接股": "tag-willing"}.get(intent, "tag-income")
-            pnl = float(p.get("pnl_pct", 0))
-            pnl_color = "#10b981" if pnl >= 0 else "#ef4444"
+            strat_cls = "tag-put-sm" if "Put" in strat else "tag-call-sm"
+            premium = float(p.get("premium", 0) or 0)
+            current = float(p.get("current_price", 0) or 0)
+            pnl_pct = ((premium - current) / premium * 100) if premium > 0 else 0
+            pnl_color = "#10b981" if pnl_pct >= 0 else "#ef4444"
             st.markdown(f"""<div class="option-card" style="display:flex;align-items:center;flex-wrap:wrap;gap:12px">
                 <strong style="font-size:1.1rem">{p.get('ticker','')}</strong>
-                <span>${p.get('strike',0)} | {p.get('expiry','')}</span>
+                <span>${p.get('strike',0)} | {str(p.get('expiry',''))[:10]}</span>
+                <span class="strategy-tag-sm {strat_cls}">{strat}</span>
                 <span class="intent-tag {tag_class}">{intent}</span>
-                <span style="color:{pnl_color};margin-left:auto;font-weight:600">{pnl:+.1f}%</span>
+                <span style="color:{pnl_color};margin-left:auto;font-weight:600">{pnl_pct:+.1f}%</span>
             </div>""", unsafe_allow_html=True)
     else:
         st.info("暂无持仓记录。前往 🔍 扫描页面开始分析！")

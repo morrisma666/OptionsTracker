@@ -1,6 +1,6 @@
 """
 期权扫描页 - 支持 Sell Put / Sell Call，两种交易意图
-Greeks 全部用 Black-Scholes 计算，不依赖 yfinance
+Greeks 全部用 Black-Scholes 计算（r=5%, q=0%）
 """
 
 import streamlit as st
@@ -27,6 +27,9 @@ st.markdown("""<style>
 .score-low { background:#ef4444; color:white; }
 .warning-card { background:#fef3c7; border-left:4px solid #f59e0b; border-radius:8px; padding:0.8rem; margin:0.3rem 0; color:#92400e; }
 .danger-card { background:#fee2e2; border-left:4px solid #ef4444; border-radius:8px; padding:0.8rem; margin:0.3rem 0; color:#991b1b; }
+.strategy-tag { display:inline-block; padding:3px 10px; border-radius:6px; font-weight:700; font-size:0.8rem; margin-bottom:4px; }
+.tag-put { background:#7c3aed; color:white; }
+.tag-call { background:#0891b2; color:white; }
 </style>""", unsafe_allow_html=True)
 
 
@@ -53,6 +56,10 @@ def render_option_card(opt, result, stock_info, iv_rank, mode, strategy, idx):
             pass
 
     with st.container():
+        # 策略标签
+        tag_cls = "tag-put" if strategy == "Sell Put" else "tag-call"
+        st.markdown(f'<span class="strategy-tag {tag_cls}">{strategy}</span>', unsafe_allow_html=True)
+
         if earnings_warning:
             st.markdown('<div class="danger-card">🚨 财报前禁入警告：到期日跨越财报日！</div>',
                         unsafe_allow_html=True)
@@ -103,30 +110,54 @@ def render_option_card(opt, result, stock_info, iv_rank, mode, strategy, idx):
             st.markdown(f"<div class='warning-card'>💡 切换到「{hint_mode}」模式评分更高: "
                         f"{hint_score:.0f}分</div>", unsafe_allow_html=True)
 
-        # 加入持仓按钮
-        if st.button(f"➕ 加入持仓", key=f"add_{idx}_{opt.get('contract', '')}"):
-            position = {
-                "ticker": opt.get("ticker", ""),
-                "strategy": strategy,
-                "intent": mode,
-                "strike": opt.get("strike", 0),
-                "expiry": opt.get("expiry", ""),
-                "open_date": date.today().isoformat(),
-                "premium": opt.get("last_price", 0),
-                "margin": opt.get("strike", 0) * 100 * 0.20,
-                "current_price": opt.get("last_price", 0),
-                "pnl_pct": 0,
-                "status": "持仓中",
-                "target_cost": result.get("target_cost", None),
-                "take_profit_price": result.get("take_profit_price", None),
-                "score": result["total_score"],
-                "contract_symbol": opt.get("contract", ""),
-                "notes": "",
-            }
-            if add_position(position):
-                st.success(f"✅ 已加入持仓: {opt.get('ticker', '')} ${opt.get('strike', 0)} {opt.get('expiry', '')}")
-            else:
-                st.warning("添加到数据库失败。如未配置数据库，持仓不会持久保存。")
+        # 加入持仓按钮 -> 弹出表单
+        contract_key = opt.get('contract', f'{idx}')
+        if st.button(f"➕ 加入持仓", key=f"add_{idx}_{contract_key}"):
+            st.session_state[f"show_form_{contract_key}"] = True
+
+        if st.session_state.get(f"show_form_{contract_key}", False):
+            with st.form(key=f"form_{contract_key}"):
+                st.subheader("确认加入持仓")
+                fc1, fc2 = st.columns(2)
+                fc1.text_input("股票代码", value=opt.get("ticker", ""), disabled=True)
+                fc2.text_input("策略", value=strategy, disabled=True)
+                fc1.text_input("行权价", value=f"${opt.get('strike', 0):.2f}", disabled=True)
+                fc2.text_input("到期日", value=opt.get("expiry", ""), disabled=True)
+                fc1.text_input("权利金", value=f"${opt.get('last_price', 0):.2f}", disabled=True)
+                fc2.text_input("交易意图", value=mode, disabled=True)
+                margin_input = fc1.number_input(
+                    "保证金占用 ($)",
+                    value=round(opt.get("strike", 0) * 100 * 0.20, 0),
+                    step=100.0,
+                    min_value=0.0,
+                )
+                notes_input = fc2.text_input("备注", value="")
+
+                submitted = st.form_submit_button("✅ 确认保存", use_container_width=True)
+                if submitted:
+                    position = {
+                        "ticker": opt.get("ticker", ""),
+                        "strategy": strategy,
+                        "intent": mode,
+                        "strike": opt.get("strike", 0),
+                        "expiry": opt.get("expiry", ""),
+                        "open_date": date.today().isoformat(),
+                        "premium": opt.get("last_price", 0),
+                        "margin": margin_input,
+                        "current_price": opt.get("last_price", 0),
+                        "pnl_pct": 0,
+                        "status": "持仓中",
+                        "target_cost": result.get("target_cost", None),
+                        "take_profit_price": result.get("take_profit_price", None),
+                        "score": result["total_score"],
+                        "contract_symbol": opt.get("contract", ""),
+                        "notes": notes_input,
+                    }
+                    if add_position(position):
+                        st.success(f"✅ 已保存: {opt.get('ticker', '')} ${opt.get('strike', 0)} {opt.get('expiry', '')}")
+                        st.session_state[f"show_form_{contract_key}"] = False
+                    else:
+                        st.warning("保存失败。请检查数据库配置。")
 
         st.markdown("---")
 
@@ -183,12 +214,12 @@ expiry_filter = None
 if ticker_input:
     expirations = get_expiration_dates(ticker_input)
     if expirations:
-        # 找出默认选项：DTE在21-45天的第一个
+        # 找默认：第一个DTE在21-45天的
         default_idx = 0
         for i, exp in enumerate(expirations):
             dte = (pd.to_datetime(exp) - pd.Timestamp.now()).days
             if 21 <= dte <= 45:
-                default_idx = i + 1  # +1 因为有"全部"选项
+                default_idx = i + 1
                 break
 
         expiry_options = ["全部（DTE≥21天）"] + expirations
@@ -218,7 +249,6 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
             st.warning("未找到符合条件的期权（权利金≥$0.05, OI≥50）。请尝试换一个到期日或股票代码。")
             st.stop()
 
-        # 添加ticker列
         chain["ticker"] = ticker_input
 
         # 计算评分
@@ -234,13 +264,14 @@ if ticker_input and st.button("🔍 开始扫描", type="primary", use_container
 
             results.append((opt, result))
 
-        # 排序：纯收租按IV Rank（评分已含IV权重），愿意接股按年化收益率
+        # 排序：纯收租按评分（IV Rank权重最高），愿意接股按年化收益率
         if mode == "纯收租":
-            results.sort(key=lambda x: iv_rank * 100 + x[1]["total_score"], reverse=True)
+            results.sort(key=lambda x: x[1]["total_score"], reverse=True)
         else:
             results.sort(key=lambda x: x[0].get("annual_return", 0), reverse=True)
 
-        st.markdown(f"**找到 {len(results)} 个结果** · 排序方式：{'IV Rank优先' if mode == '纯收租' else '年化收益率优先'}")
+        sort_label = "综合评分（IV Rank权重最高）" if mode == "纯收租" else "年化收益率"
+        st.markdown(f"**找到 {len(results)} 个结果** · 排序：{sort_label}")
         st.markdown("---")
 
         for idx, (opt, result) in enumerate(results[:20]):
